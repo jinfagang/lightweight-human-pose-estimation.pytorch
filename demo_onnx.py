@@ -77,7 +77,7 @@ def infer_fast2(net, img, net_input_height_size, stride, upsample_ratio, cpu,
     height, width, _ = img.shape
     scale = net_input_height_size / height
 
-    scaled_img = cv2.resize(img, (456, 256), interpolation=cv2.INTER_LINEAR)
+    scaled_img = cv2.resize(img, (256, 256), interpolation=cv2.INTER_LINEAR)
     print(scaled_img.shape)
     scaled_img = normalize(scaled_img, img_mean, img_scale)
     min_dims = [net_input_height_size, max(scaled_img.shape[1], net_input_height_size)]
@@ -112,7 +112,7 @@ def run_demo(image_provider, height_size, cpu, track, smooth):
         for kpt_idx in range(num_keypoints):  # 19th for bg
             total_keypoints_num += extract_keypoints(heatmaps[:, :, kpt_idx], all_keypoints_by_type, total_keypoints_num)
 
-        print(all_keypoints_by_type)
+        # print(all_keypoints_by_type)
         pose_entries, all_keypoints = group_keypoints(all_keypoints_by_type, pafs)
         for kpt_id in range(all_keypoints.shape[0]):
             all_keypoints[kpt_id, 0] = (all_keypoints[kpt_id, 0] * stride / upsample_ratio - pad[1]) / scale

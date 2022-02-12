@@ -66,7 +66,7 @@ def infer_fast(net, img, net_input_height_size, stride, upsample_ratio, cpu,
     tensor_img = torch.from_numpy(padded_img).permute(2, 0, 1).unsqueeze(0).float()
     if not cpu:
         tensor_img = tensor_img.cuda()
-
+    print(tensor_img.shape)
     stages_output = net(tensor_img)
 
     # stage2_heatmaps = stages_output[-2]
