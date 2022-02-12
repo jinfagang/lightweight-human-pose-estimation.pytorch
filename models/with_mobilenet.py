@@ -1,13 +1,14 @@
 import torch
 from torch import nn
-
+import torch.nn.functional as F
 from modules.conv import conv, conv_dw, conv_dw_no_bn
 
 
 class Cpm(nn.Module):
     def __init__(self, in_channels, out_channels):
         super().__init__()
-        self.align = conv(in_channels, out_channels, kernel_size=1, padding=0, bn=False)
+        self.align = conv(in_channels, out_channels,
+                          kernel_size=1, padding=0, bn=False)
         self.trunk = nn.Sequential(
             conv_dw_no_bn(out_channels, out_channels),
             conv_dw_no_bn(out_channels, out_channels),
@@ -31,7 +32,8 @@ class InitialStage(nn.Module):
         )
         self.heatmaps = nn.Sequential(
             conv(num_channels, 512, kernel_size=1, padding=0, bn=False),
-            conv(512, num_heatmaps, kernel_size=1, padding=0, bn=False, relu=False)
+            conv(512, num_heatmaps, kernel_size=1,
+                 padding=0, bn=False, relu=False)
         )
         self.pafs = nn.Sequential(
             conv(num_channels, 512, kernel_size=1, padding=0, bn=False),
@@ -48,7 +50,8 @@ class InitialStage(nn.Module):
 class RefinementStageBlock(nn.Module):
     def __init__(self, in_channels, out_channels):
         super().__init__()
-        self.initial = conv(in_channels, out_channels, kernel_size=1, padding=0, bn=False)
+        self.initial = conv(in_channels, out_channels,
+                            kernel_size=1, padding=0, bn=False)
         self.trunk = nn.Sequential(
             conv(out_channels, out_channels),
             conv(out_channels, out_channels, dilation=2, padding=2)
@@ -72,11 +75,13 @@ class RefinementStage(nn.Module):
         )
         self.heatmaps = nn.Sequential(
             conv(out_channels, out_channels, kernel_size=1, padding=0, bn=False),
-            conv(out_channels, num_heatmaps, kernel_size=1, padding=0, bn=False, relu=False)
+            conv(out_channels, num_heatmaps, kernel_size=1,
+                 padding=0, bn=False, relu=False)
         )
         self.pafs = nn.Sequential(
             conv(out_channels, out_channels, kernel_size=1, padding=0, bn=False),
-            conv(out_channels, num_pafs, kernel_size=1, padding=0, bn=False, relu=False)
+            conv(out_channels, num_pafs, kernel_size=1,
+                 padding=0, bn=False, relu=False)
         )
 
     def forward(self, x):
@@ -90,9 +95,9 @@ class PoseEstimationWithMobileNet(nn.Module):
     def __init__(self, num_refinement_stages=1, num_channels=128, num_heatmaps=19, num_pafs=38):
         super().__init__()
         self.model = nn.Sequential(
-            conv(     3,  32, stride=2, bias=False),
-            conv_dw( 32,  64),
-            conv_dw( 64, 128, stride=2),
+            conv(3,  32, stride=2, bias=False),
+            conv_dw(32,  64),
+            conv_dw(64, 128, stride=2),
             conv_dw(128, 128),
             conv_dw(128, 256, stride=2),
             conv_dw(256, 256),
@@ -119,5 +124,15 @@ class PoseEstimationWithMobileNet(nn.Module):
         for refinement_stage in self.refinement_stages:
             stages_output.extend(
                 refinement_stage(torch.cat([backbone_features, stages_output[-2], stages_output[-1]], dim=1)))
+        if torch.onnx.is_in_onnx_export():
+            # we merge stage interpolate into model
+            stage2_heatmaps = stages_output[-2]  # should be [b, 19, 32, 57]
+            heatmaps = F.interpolate(stage2_heatmaps, scale_factor=4, mode='bicubic')
+            heatmaps = heatmaps.permute((0, 2, 3, 1))
 
-        return stages_output
+            stage2_pafs = stages_output[-1]
+            pafs = F.interpolate(stage2_pafs, scale_factor=4, mode='bicubic')
+            pafs = pafs.permute((0, 2, 3, 1))
+            return heatmaps, pafs
+        else:
+            return stages_output

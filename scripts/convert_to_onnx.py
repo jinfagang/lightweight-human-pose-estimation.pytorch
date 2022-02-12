@@ -17,7 +17,7 @@ def convert_to_onnx(net, output_name):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--checkpoint-path', type=str, required=True, help='path to the checkpoint')
+    parser.add_argument('-c', '--checkpoint-path', type=str, required=True, help='path to the checkpoint')
     parser.add_argument('--output-name', type=str, default='human-pose-estimation.onnx',
                         help='name of output model in ONNX format')
     args = parser.parse_args()

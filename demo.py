@@ -9,7 +9,9 @@ from modules.keypoints import extract_keypoints, group_keypoints
 from modules.load_state import load_state
 from modules.pose import Pose, track_poses
 from val import normalize, pad_width
+import torch.nn.functional as F
 
+torch.set_grad_enabled(False)
 
 class ImageReader(object):
     def __init__(self, file_names):
@@ -67,14 +69,27 @@ def infer_fast(net, img, net_input_height_size, stride, upsample_ratio, cpu,
 
     stages_output = net(tensor_img)
 
-    stage2_heatmaps = stages_output[-2]
-    heatmaps = np.transpose(stage2_heatmaps.squeeze().cpu().data.numpy(), (1, 2, 0))
-    heatmaps = cv2.resize(heatmaps, (0, 0), fx=upsample_ratio, fy=upsample_ratio, interpolation=cv2.INTER_CUBIC)
+    # stage2_heatmaps = stages_output[-2]
+    # heatmaps = np.transpose(stage2_heatmaps.squeeze().cpu().data.numpy(), (1, 2, 0))
+    # heatmaps = cv2.resize(heatmaps, (0, 0), fx=upsample_ratio, fy=upsample_ratio, interpolation=cv2.INTER_CUBIC)
+
+    # stage2_pafs = stages_output[-1]
+    # pafs = np.transpose(stage2_pafs.squeeze().cpu().data.numpy(), (1, 2, 0))
+    # pafs = cv2.resize(pafs, (0, 0), fx=upsample_ratio, fy=upsample_ratio, interpolation=cv2.INTER_CUBIC)
+    
+    stage2_heatmaps = stages_output[-2]  # should be [b, 19, 32, 57]
+    heatmaps = F.interpolate(stage2_heatmaps, scale_factor=4, mode='bicubic')
+    heatmaps = heatmaps.permute((0, 2, 3, 1))
 
     stage2_pafs = stages_output[-1]
-    pafs = np.transpose(stage2_pafs.squeeze().cpu().data.numpy(), (1, 2, 0))
-    pafs = cv2.resize(pafs, (0, 0), fx=upsample_ratio, fy=upsample_ratio, interpolation=cv2.INTER_CUBIC)
+    pafs = F.interpolate(stage2_pafs, scale_factor=4, mode='bicubic')
+    pafs = pafs.permute((0, 2, 3, 1))
 
+    heatmaps = heatmaps.squeeze(0).numpy()
+    pafs = pafs.squeeze(0).numpy()
+
+    print(heatmaps.shape)
+    print(pafs.shape)
     return heatmaps, pafs, scale, pad
 
 
@@ -141,7 +156,7 @@ if __name__ == '__main__':
         description='''Lightweight human pose estimation python demo.
                        This is just for quick results preview.
                        Please, consider c++ demo for the best performance.''')
-    parser.add_argument('--checkpoint-path', type=str, required=True, help='path to the checkpoint')
+    parser.add_argument('-c', '--checkpoint-path', type=str, required=True, help='path to the checkpoint')
     parser.add_argument('--height-size', type=int, default=256, help='network input layer height size')
     parser.add_argument('--video', type=str, default='', help='path to video file or camera id')
     parser.add_argument('--images', nargs='+', default='', help='path to input image(s)')
