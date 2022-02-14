@@ -128,11 +128,16 @@ class PoseEstimationWithMobileNet(nn.Module):
             # we merge stage interpolate into model
             stage2_heatmaps = stages_output[-2]  # should be [b, 19, 32, 57]
             heatmaps = F.interpolate(stage2_heatmaps, scale_factor=4, mode='bicubic')
-            heatmaps = heatmaps.permute((0, 2, 3, 1))
+            # heatmaps = heatmaps.permute((0, 2, 3, 1))
 
             stage2_pafs = stages_output[-1]
             pafs = F.interpolate(stage2_pafs, scale_factor=4, mode='bicubic')
             pafs = pafs.permute((0, 2, 3, 1))
-            return heatmaps, pafs
+
+            # add extract keypoints applied to heatmaps
+            from modules.decodes import topdownhead_decode_heatmaps_without_cs
+            preds = topdownhead_decode_heatmaps_without_cs(heatmaps)
+            print(preds.shape)
+            return preds, pafs
         else:
             return stages_output
