@@ -1,12 +1,14 @@
 import argparse
-import enum
 import cv2
 import numpy as np
-from modules.pose import Pose, track_poses
 from val import normalize
 from alfred.utils.timer import ATimer
 from wanwu.core.backends.ort import ORTWrapper
 import math
+from operator import itemgetter
+from alfred.vis.image.pose import vis_pose_result, vis_pose_by_joints
+from modules.pose import Pose, track_poses
+
 
 BODY_PARTS_KPT_IDS = [[1, 2], [1, 5], [2, 3], [3, 4], [5, 6], [6, 7], [1, 8], [8, 9], [9, 10], [1, 11],
                       [11, 12], [12, 13], [1, 0], [0, 14], [14, 16], [0, 15], [15, 17], [2, 16], [5, 17]]
@@ -55,28 +57,6 @@ class VideoReader(object):
         return img
 
 
-def infer_fast(net, img, net_input_height_size, stride, upsample_ratio, cpu,
-               pad_value=(0, 0, 0), img_mean=np.array([128, 128, 128], np.float32), img_scale=np.float32(1/256)):
-    height, width, _ = img.shape
-    scale = net_input_height_size / height
-
-    scaled_img = cv2.resize(img, (0, 0), fx=scale,
-                            fy=scale, interpolation=cv2.INTER_LINEAR)
-    print(scaled_img.shape)
-    scaled_img = normalize(scaled_img, img_mean, img_scale)
-    min_dims = [net_input_height_size, max(
-        scaled_img.shape[1], net_input_height_size)]
-    padded_img, pad = pad_width(scaled_img, stride, pad_value, min_dims)
-
-    inp_img = np.expand_dims(padded_img.transpose((2, 0, 1)), axis=0)
-    print(inp_img.shape)
-    stages_output = net.infer(inp_img)
-    print(stages_output)
-    heatmaps = stages_output[0]
-    pafs = stages_output[1]
-    return heatmaps, pafs, scale, pad
-
-
 def pad_width(img, stride, pad_value, min_dims):
     h, w, _ = img.shape
     pad = []
@@ -116,10 +96,12 @@ def infer_fast2(net, img, net_input_height_size, stride, upsample_ratio, cpu,
     print(inp_img.shape)
     stages_output = net.infer(inp_img)
     # print(stages_output)
-    heatmaps = stages_output['stage_1_output_1_heatmaps'].squeeze(0)
-    pafs = stages_output['stage_1_output_0_pafs'].squeeze(0)
+    heatmaps = stages_output['stage_1_output_1_heatmaps']
+    pafs = stages_output['stage_1_output_0_pafs']
     print(heatmaps.shape)
     print(pafs.shape)
+    heatmaps = heatmaps.squeeze(0)
+    pafs = pafs.squeeze(0)
     # now heatmaps are coords, like [1, 19, 3]
     return heatmaps, pafs, scale, [top, left]
 
@@ -250,8 +232,49 @@ def group_keypoints(all_keypoints_by_type, pafs, pose_entry_size=20, min_paf_sco
     return pose_entries, all_keypoints
 
 
-def run_demo(image_provider, height_size, cpu, track, smooth):
+def extract_keypoints(heatmap, all_keypoints, total_keypoint_num):
+    heatmap[heatmap < 0.1] = 0
+    heatmap_with_borders = np.pad(heatmap, [(2, 2), (2, 2)], mode='constant')
+    heatmap_center = heatmap_with_borders[1:heatmap_with_borders.shape[0] -
+                                          1, 1:heatmap_with_borders.shape[1]-1]
+    heatmap_left = heatmap_with_borders[1:heatmap_with_borders.shape[0] -
+                                        1, 2:heatmap_with_borders.shape[1]]
+    heatmap_right = heatmap_with_borders[1:heatmap_with_borders.shape[0] -
+                                         1, 0:heatmap_with_borders.shape[1]-2]
+    heatmap_up = heatmap_with_borders[2:heatmap_with_borders.shape[0],
+                                      1:heatmap_with_borders.shape[1]-1]
+    heatmap_down = heatmap_with_borders[0:heatmap_with_borders.shape[0] -
+                                        2, 1:heatmap_with_borders.shape[1]-1]
 
+    heatmap_peaks = (heatmap_center > heatmap_left) &\
+                    (heatmap_center > heatmap_right) &\
+                    (heatmap_center > heatmap_up) &\
+                    (heatmap_center > heatmap_down)
+    heatmap_peaks = heatmap_peaks[1:heatmap_center.shape[0] -
+                                  1, 1:heatmap_center.shape[1]-1]
+    keypoints = list(zip(np.nonzero(heatmap_peaks)[
+                     1], np.nonzero(heatmap_peaks)[0]))  # (w, h)
+    keypoints = sorted(keypoints, key=itemgetter(0))
+
+    suppressed = np.zeros(len(keypoints), np.uint8)
+    keypoints_with_score_and_id = []
+    keypoint_num = 0
+    for i in range(len(keypoints)):
+        if suppressed[i]:
+            continue
+        for j in range(i+1, len(keypoints)):
+            if math.sqrt((keypoints[i][0] - keypoints[j][0]) ** 2 +
+                         (keypoints[i][1] - keypoints[j][1]) ** 2) < 6:
+                suppressed[j] = 1
+        keypoint_with_score_and_id = (keypoints[i][0], keypoints[i][1], heatmap[keypoints[i][1], keypoints[i][0]],
+                                      total_keypoint_num + keypoint_num)
+        keypoints_with_score_and_id.append(keypoint_with_score_and_id)
+        keypoint_num += 1
+    all_keypoints.append(keypoints_with_score_and_id)
+    return keypoint_num
+
+
+def run_demo(image_provider, height_size, cpu, track, smooth):
     onnx_model = ORTWrapper('human-pose-estimation.onnx')
 
     stride = 8
@@ -266,10 +289,10 @@ def run_demo(image_provider, height_size, cpu, track, smooth):
                 onnx_model, img, height_size, stride, upsample_ratio, cpu)
 
         all_keypoints_by_type = []
+        total_keypoints_num = 0
         for kpt_idx in range(num_keypoints):  # 19th for bg
-            all_keypoints_by_type.append(
-                np.array([np.append(heatmaps[kpt_idx], kpt_idx)]))
-
+            total_keypoints_num += extract_keypoints(
+                heatmaps[:, :, kpt_idx], all_keypoints_by_type, total_keypoints_num)
         pose_entries, all_keypoints = group_keypoints(
             all_keypoints_by_type, pafs)
 
@@ -279,6 +302,9 @@ def run_demo(image_provider, height_size, cpu, track, smooth):
                 all_keypoints[kpt_id, 0] * stride / upsample_ratio - pad[1]) / scale
             all_keypoints[kpt_id, 1] = (
                 all_keypoints[kpt_id, 1] * stride / upsample_ratio - pad[0]) / scale
+
+        # print(pose_entries)
+        # print(all_keypoints.shape)
         current_poses = []
         for n in range(len(pose_entries)):
             if len(pose_entries[n]) == 0:
@@ -290,21 +316,28 @@ def run_demo(image_provider, height_size, cpu, track, smooth):
                         all_keypoints[int(pose_entries[n][kpt_id]), 0])
                     pose_keypoints[kpt_id, 1] = int(
                         all_keypoints[int(pose_entries[n][kpt_id]), 1])
-            pose = Pose(pose_keypoints, pose_entries[n][18])
-            current_poses.append(pose)
+            # print(pose_entries[n][18])
+            current_poses.append(pose_keypoints)
 
-        if track:
-            track_poses(previous_poses, current_poses, smooth=smooth)
-            previous_poses = current_poses
-        for pose in current_poses:
-            pose.draw(img)
-        img = cv2.addWeighted(orig_img, 0.6, img, 0.4, 0)
-        for pose in current_poses:
-            cv2.rectangle(img, (pose.bbox[0], pose.bbox[1]),
-                          (pose.bbox[0] + pose.bbox[2], pose.bbox[1] + pose.bbox[3]), (0, 255, 0))
-            if track:
-                cv2.putText(img, 'id: {}'.format(pose.id), (pose.bbox[0], pose.bbox[1] - 16),
-                            cv2.FONT_HERSHEY_COMPLEX, 0.5, (0, 0, 255))
+        # vis these pose keypoints
+        current_poses = np.stack(current_poses)
+        print(current_poses.shape)
+        # img = vis_pose_result(img, current_poses)
+        img = vis_pose_by_joints(img, current_poses, BODY_PARTS_KPT_IDS)
+
+        # if track:
+        #     track_poses(previous_poses, current_poses, smooth=smooth)
+        #     previous_poses = current_poses
+        # for pose in current_poses:
+        #     pose.draw(img)
+        # img = cv2.addWeighted(orig_img, 0.6, img, 0.4, 0)
+        # for pose in current_poses:
+        #     cv2.rectangle(img, (pose.bbox[0], pose.bbox[1]),
+        #                   (pose.bbox[0] + pose.bbox[2], pose.bbox[1] + pose.bbox[3]), (0, 255, 0))
+        #     if track:
+        #         cv2.putText(img, 'id: {}'.format(pose.id), (pose.bbox[0], pose.bbox[1] - 16),
+        #                     cv2.FONT_HERSHEY_COMPLEX, 0.5, (0, 0, 255))
+
         cv2.imshow('Lightweight Human Pose Estimation Python Demo', img)
         key = cv2.waitKey(delay)
         if key == 27:  # esc
@@ -331,7 +364,7 @@ if __name__ == '__main__':
                         help='path to input image(s)')
     parser.add_argument('--cpu', action='store_true',
                         help='run network inference on cpu')
-    parser.add_argument('--track', type=int, default=1,
+    parser.add_argument('--track', type=int, default=0,
                         help='track pose id in video')
     parser.add_argument('--smooth', type=int, default=1,
                         help='smooth pose keypoints')
